@@ -1,0 +1,8 @@
+[tunnel]
+local_v6 = "2001:d8::1"
+local_v4 = "192.0.0.2"
+
+[aftr]
+address = "2001:d8::2"
+
+[health]

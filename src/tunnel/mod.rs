@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use thiserror::Error;
 
 #[cfg(target_os = "linux")]
@@ -18,9 +17,8 @@ pub enum TunnelError {
     StatusCheckFailed(String),
 }
 
-#[async_trait]
-pub trait TunnelBackend {
-    async fn setup(&self) -> Result<(), TunnelError>;
-    async fn teardown(&self) -> Result<(), TunnelError>;
-    async fn is_up(&self) -> Result<bool, TunnelError>;
+pub trait TunnelBackend: Send + Sync {
+    fn setup(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
+    fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
+    fn is_up(&self) -> impl Future<Output = Result<bool, TunnelError>> + Send;
 }

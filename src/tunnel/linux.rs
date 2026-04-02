@@ -1,5 +1,4 @@
 use crate::tunnel::{TunnelBackend, TunnelError};
-use async_trait::async_trait;
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{
     Handle, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder, new_connection,
@@ -72,6 +71,7 @@ impl LinuxBackend {
                     self.name
                 ))
             })
+            .inspect(|u| tracing::debug!(name = %self.name, index = %u, "created interface"))
     }
 
     async fn add_address(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
@@ -81,6 +81,7 @@ impl LinuxBackend {
             .execute()
             .await
             .map_err(|e| TunnelError::AddressFailed(e.to_string()))
+            .inspect(|_| tracing::debug!(address = %self.local_v4, "assigned local address"))
     }
 
     async fn add_default_route(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
@@ -95,10 +96,10 @@ impl LinuxBackend {
             .execute()
             .await
             .map_err(|e| TunnelError::RouteFailed(e.to_string()))
+            .inspect(|_| tracing::debug!("default route added"))
     }
 }
 
-#[async_trait]
 impl TunnelBackend for LinuxBackend {
     async fn setup(&self) -> Result<(), TunnelError> {
         let handle = Self::open_handle()?;
@@ -106,6 +107,14 @@ impl TunnelBackend for LinuxBackend {
         let index = self.create_tunnel(&handle).await?;
         self.add_address(&handle, index).await?;
         self.add_default_route(&handle, index).await?;
+
+        tracing::info!(
+            name = %self.name,
+            local_v6 = %self.local_v6,
+            remote_v6 = %self.remote_v6,
+            local_v4 = %self.local_v4,
+            "tunnel established"
+        );
 
         Ok(())
     }
@@ -127,6 +136,7 @@ impl TunnelBackend for LinuxBackend {
             .execute()
             .await
             .map_err(|e| TunnelError::DestroyFailed(e.to_string()))
+            .inspect(|_| tracing::info!(name=%self.name, "interface removed"))
     }
 
     async fn is_up(&self) -> Result<bool, TunnelError> {
