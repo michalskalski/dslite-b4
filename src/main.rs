@@ -1,3 +1,5 @@
+#[cfg(target_os = "illumos")]
+use dslite_b4::tunnel::illumos::IllumosBackend;
 #[cfg(target_os = "linux")]
 use dslite_b4::tunnel::linux::LinuxBackend;
 use dslite_b4::{config::Config, dns::resolve, tunnel::TunnelBackend};
@@ -49,14 +51,21 @@ async fn main() -> anyhow::Result<()> {
                 aftr_ip,
                 config.tunnel.local_v4,
             );
+            #[cfg(target_os = "illumos")]
+            let backend = IllumosBackend::new(
+                config.tunnel.name,
+                config.tunnel.local_v6,
+                aftr_ip,
+                config.tunnel.local_v4,
+            )?;
 
-            run_daemon(backend).await?
+            run(backend).await?
         }
     }
     Ok(())
 }
 
-async fn run_daemon<B: TunnelBackend>(backend: B) -> anyhow::Result<()> {
+async fn run<B: TunnelBackend>(backend: B) -> anyhow::Result<()> {
     backend.setup().await?;
 
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;

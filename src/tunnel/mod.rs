@@ -3,6 +3,9 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+#[cfg(target_os = "illumos")]
+pub mod illumos;
+
 #[derive(Debug, Error)]
 pub enum TunnelError {
     #[error("creating tunnel: {0}")]
