@@ -6,11 +6,14 @@ use std::{
 
 const NI_MAXHOST: usize = 1025;
 const DLADM_STATUS_OK: u32 = 0;
+const IPADM_STATUS_OK: u32 = 0;
+const AF_INET: u16 = 2;
 
 const IPTUN_PARAM_TYPE: c_uint = 0x00000001;
 const IPTUN_PARAM_LADDR: c_uint = 0x00000002;
 const IPTUN_PARAM_RADDR: c_uint = 0x00000004;
 const DLADM_OPT_ACTIVE: c_uint = 0x00000001;
+const IPADM_OPT_ACTIVE: u32 = 0x00000002;
 
 unsafe extern "C" {
     fn dladm_open(handle: *mut *mut c_void) -> u32;
@@ -30,6 +33,10 @@ unsafe extern "C" {
         class: *mut u32,
         media: *mut u32,
     ) -> u32;
+    fn ipadm_open(handle: *mut *mut c_void, flags: u32) -> u32;
+    fn ipadm_close(handle: *mut c_void);
+    fn ipadm_create_if(handle: *mut c_void, name: *mut c_char, family: u16, flags: u32) -> u32;
+    fn ipadm_delete_if(handle: *mut c_void, name: *const c_char, family: u16, flags: u32) -> u32;
 }
 
 #[repr(C)]
@@ -104,6 +111,25 @@ impl IllumosBackend {
         Ok(params.link_id)
     }
 
+    fn create_if(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
+        unsafe {
+            let status = ipadm_create_if(
+                handle.ptr,
+                self.cname.as_ptr() as *mut c_char,
+                AF_INET,
+                IPADM_OPT_ACTIVE,
+            );
+            if status != IPADM_STATUS_OK {
+                return Err(TunnelError::CreationFailed(format!(
+                    "ipadm_create_if failed with status {}",
+                    status
+                )));
+            }
+        };
+        tracing::debug!("ip interface assigned to tunel");
+        Ok(())
+    }
+
     fn delete_tunnel(&self, handle: &DladmHandle) -> Result<(), TunnelError> {
         let (link_id, status) = self.name_to_linkid(handle);
         if status != DLADM_STATUS_OK {
@@ -123,6 +149,21 @@ impl IllumosBackend {
             }
         };
 
+        Ok(())
+    }
+
+    fn delete_if(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
+        unsafe {
+            let status =
+                ipadm_delete_if(handle.ptr, self.cname.as_ptr(), AF_INET, IPADM_OPT_ACTIVE);
+            if status != IPADM_STATUS_OK {
+                return Err(TunnelError::DestroyFailed(format!(
+                    "ipadm_delete_if failed with status {}",
+                    status
+                )));
+            }
+        };
+        tracing::debug!("ip interface deleted");
         Ok(())
     }
 
@@ -148,7 +189,13 @@ impl TunnelBackend for IllumosBackend {
             TunnelError::CreationFailed(format!("unable to open handle, dladm_open status {}", e))
         })?;
         let _link_id = self.create_tunnel(&handle)?;
-        // TODO: plumb IP interface (ipadm create-ip) and assign IPv4 address
+
+        let ip_handle = open_ipadm().map_err(|e| {
+            TunnelError::CreationFailed(format!("unable to open handle, ipadm_open status {}", e))
+        })?;
+        self.create_if(&ip_handle)?;
+
+        // TODO: assign IPv4 address
 
         tracing::info!(
             name = %self.cname.to_string_lossy(),
@@ -161,6 +208,11 @@ impl TunnelBackend for IllumosBackend {
     }
 
     async fn teardown(&self) -> Result<(), TunnelError> {
+        let ip_handle = open_ipadm().map_err(|e| {
+            TunnelError::DestroyFailed(format!("unable to open handle, ipadm_open status {}", e))
+        })?;
+        self.delete_if(&ip_handle)?;
+
         let handle = open_dladm().map_err(|e| {
             TunnelError::DestroyFailed(format!("unable to open handle, dladm_open status {}", e))
         })?;
@@ -186,6 +238,16 @@ struct DladmHandle {
 impl Drop for DladmHandle {
     fn drop(&mut self) {
         unsafe { dladm_close(self.ptr) };
+    }
+}
+
+struct IpadmHandle {
+    ptr: *mut c_void,
+}
+
+impl Drop for IpadmHandle {
+    fn drop(&mut self) {
+        unsafe { ipadm_close(self.ptr) }
     }
 }
 
@@ -225,4 +287,13 @@ fn open_dladm() -> Result<DladmHandle, u32> {
         return Err(status);
     }
     Ok(DladmHandle { ptr })
+}
+
+fn open_ipadm() -> Result<IpadmHandle, u32> {
+    let mut ptr: *mut c_void = std::ptr::null_mut();
+    let status = unsafe { ipadm_open(&mut ptr, 0) };
+    if status != IPADM_STATUS_OK {
+        return Err(status);
+    }
+    Ok(IpadmHandle { ptr })
 }
