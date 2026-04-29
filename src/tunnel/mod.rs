@@ -1,4 +1,8 @@
+use std::net::Ipv4Addr;
 use thiserror::Error;
+
+// RFC 6333 5.7: AFTR element reserved address
+const AFTR_V4_ELEMENT: Ipv4Addr = Ipv4Addr::new(192, 0, 0, 1);
 
 #[cfg(target_os = "linux")]
 pub mod linux;

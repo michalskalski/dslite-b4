@@ -1,6 +1,6 @@
-use crate::tunnel::{TunnelBackend, TunnelError};
+use crate::tunnel::{AFTR_V4_ELEMENT, TunnelBackend, TunnelError};
 use std::{
-    ffi::{CString, c_char, c_uint, c_void},
+    ffi::{CStr, CString, c_char, c_uint, c_void},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -8,12 +8,16 @@ const NI_MAXHOST: usize = 1025;
 const DLADM_STATUS_OK: u32 = 0;
 const IPADM_STATUS_OK: u32 = 0;
 const AF_INET: u16 = 2;
+const AF_UNSPEC: u16 = 0;
+const IPADM_ADDR_STATIC: u32 = 1;
 
 const IPTUN_PARAM_TYPE: c_uint = 0x00000001;
 const IPTUN_PARAM_LADDR: c_uint = 0x00000002;
 const IPTUN_PARAM_RADDR: c_uint = 0x00000004;
 const DLADM_OPT_ACTIVE: c_uint = 0x00000001;
 const IPADM_OPT_ACTIVE: u32 = 0x00000002;
+const IPADM_OPT_UP: u32 = 0x00001000;
+const IPADM_OPT_V46: u32 = 0x00002000;
 
 unsafe extern "C" {
     fn dladm_open(handle: *mut *mut c_void) -> u32;
@@ -37,6 +41,13 @@ unsafe extern "C" {
     fn ipadm_close(handle: *mut c_void);
     fn ipadm_create_if(handle: *mut c_void, name: *mut c_char, family: u16, flags: u32) -> u32;
     fn ipadm_delete_if(handle: *mut c_void, name: *const c_char, family: u16, flags: u32) -> u32;
+    fn ipadm_create_addrobj(addrtype: u32, name: *const c_char, addrobj: *mut *mut c_void) -> u32;
+    fn ipadm_destroy_addrobj(addrobj: *mut c_void);
+    fn ipadm_set_addr(addrobj: *mut c_void, addr: *const c_char, family: u16) -> u32;
+    fn ipadm_set_dst_addr(addrobj: *mut c_void, addr: *const c_char, family: u16) -> u32;
+    fn ipadm_create_addr(handle: *mut c_void, addrobj: *mut c_void, flags: u32) -> u32;
+    fn ipadm_delete_addr(handle: *mut c_void, addr: *const c_char, flags: u32) -> u32;
+
 }
 
 #[repr(C)]
@@ -69,6 +80,7 @@ struct IpTunParams {
 
 pub struct IllumosBackend {
     cname: CString,
+    aobjname: CString,
     local_v6: Ipv6Addr,
     remote_v6: Ipv6Addr,
     local_v4: Ipv4Addr,
@@ -81,10 +93,12 @@ impl IllumosBackend {
         remote_v6: Ipv6Addr,
         local_v4: Ipv4Addr,
     ) -> Result<Self, std::ffi::NulError> {
+        let aobjname = std::ffi::CString::new(format!("{}/v4", name))?;
         let cname = std::ffi::CString::new(name)?;
 
         Ok(Self {
             cname,
+            aobjname,
             local_v6,
             remote_v6,
             local_v4,
@@ -167,6 +181,19 @@ impl IllumosBackend {
         Ok(())
     }
 
+    fn delete_addr(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
+        unsafe {
+            let status = ipadm_delete_addr(handle.ptr, self.aobjname.as_ptr(), IPADM_OPT_ACTIVE);
+            if status != IPADM_STATUS_OK {
+                return Err(TunnelError::DestroyFailed(format!(
+                    "failed to destroy address, ipadm_delete_addr status {}",
+                    status,
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn name_to_linkid(&self, handle: &DladmHandle) -> (u32, u32) {
         let mut link_id: u32 = 0;
         let status = unsafe {
@@ -193,9 +220,41 @@ impl TunnelBackend for IllumosBackend {
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, ipadm_open status {}", e))
         })?;
-        self.create_if(&ip_handle)?;
+        // self.create_if(&ip_handle)?;
 
-        // TODO: assign IPv4 address
+        let addrobj = IpadmAddrobj::new(IPADM_ADDR_STATIC, &self.aobjname).map_err(|e| {
+            TunnelError::CreationFailed(format!(
+                "unable to crate addrobj, ipadm_create_addrobj status {}",
+                e
+            ))
+        })?;
+
+        let laddr = std::ffi::CString::new(self.local_v4.to_string()).unwrap();
+        addrobj.set_addr(laddr.as_c_str(), AF_UNSPEC).map_err(|e| {
+            TunnelError::CreationFailed(format!(
+                "unable to set local address, ipadm_set_addr status {}",
+                e
+            ))
+        })?;
+
+        let raddr = std::ffi::CString::new(AFTR_V4_ELEMENT.to_string()).unwrap();
+        addrobj
+            .set_dst_addr(raddr.as_c_str(), AF_UNSPEC)
+            .map_err(|e| {
+                TunnelError::CreationFailed(format!(
+                    "unable to set remote address, ipadm_set_dst_addr status {}",
+                    e
+                ))
+            })?;
+
+        addrobj
+            .commit(&ip_handle, IPADM_OPT_ACTIVE | IPADM_OPT_UP | IPADM_OPT_V46)
+            .map_err(|e| {
+                TunnelError::CreationFailed(format!(
+                    "unable to commit new address settings, ipadm_create_addr status {}",
+                    e
+                ))
+            })?;
 
         tracing::info!(
             name = %self.cname.to_string_lossy(),
@@ -211,6 +270,9 @@ impl TunnelBackend for IllumosBackend {
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::DestroyFailed(format!("unable to open handle, ipadm_open status {}", e))
         })?;
+
+        self.delete_addr(&ip_handle)?;
+
         self.delete_if(&ip_handle)?;
 
         let handle = open_dladm().map_err(|e| {
@@ -247,7 +309,60 @@ struct IpadmHandle {
 
 impl Drop for IpadmHandle {
     fn drop(&mut self) {
-        unsafe { ipadm_close(self.ptr) }
+        unsafe { ipadm_close(self.ptr) };
+    }
+}
+
+struct IpadmAddrobj {
+    ptr: *mut c_void,
+}
+
+impl IpadmAddrobj {
+    fn new(addr_type: u32, aobjname: &CStr) -> Result<Self, u32> {
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let status = unsafe { ipadm_create_addrobj(addr_type, aobjname.as_ptr(), &mut ptr) };
+        if status != IPADM_STATUS_OK {
+            return Err(status);
+        }
+        Ok(Self { ptr })
+    }
+
+    fn set_addr(&self, addr: &CStr, family: u16) -> Result<(), u32> {
+        unsafe {
+            let status = ipadm_set_addr(self.ptr, addr.as_ptr(), family);
+            if status != IPADM_STATUS_OK {
+                return Err(status);
+            }
+        }
+        Ok(())
+    }
+
+    fn set_dst_addr(&self, addr: &CStr, family: u16) -> Result<(), u32> {
+        unsafe {
+            let status = ipadm_set_dst_addr(self.ptr, addr.as_ptr(), family);
+            if status != IPADM_STATUS_OK {
+                return Err(status);
+            }
+        }
+        Ok(())
+    }
+
+    fn commit(&self, handle: &IpadmHandle, flags: u32) -> Result<(), u32> {
+        unsafe {
+            let status = ipadm_create_addr(handle.ptr, self.ptr, flags);
+            if status != IPADM_STATUS_OK {
+                return Err(status);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for IpadmAddrobj {
+    fn drop(&mut self) {
+        unsafe {
+            ipadm_destroy_addrobj(self.ptr);
+        };
     }
 }
 
