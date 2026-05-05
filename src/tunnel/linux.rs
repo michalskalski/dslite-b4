@@ -1,11 +1,10 @@
-use crate::tunnel::{TunnelBackend, TunnelError};
+use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, TunnelBackend, TunnelError};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{
     Handle, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder, new_connection,
     packet_route::{
         IpProtocol,
         link::{InfoData, InfoIpTunnel, InfoKind, Ip6TunnelFlags, LinkFlags},
-        route::RouteScope,
     },
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -77,7 +76,7 @@ impl LinuxBackend {
     async fn add_address(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
         handle
             .address()
-            .add(index, std::net::IpAddr::V4(self.local_v4), 32)
+            .add(index, std::net::IpAddr::V4(self.local_v4), B4_V4_PREFIX_LEN)
             .execute()
             .await
             .map_err(|e| TunnelError::AddressFailed(e.to_string()))
@@ -87,7 +86,7 @@ impl LinuxBackend {
     async fn add_default_route(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
         let route = RouteMessageBuilder::<Ipv4Addr>::new()
             .output_interface(index)
-            .scope(RouteScope::Link)
+            .gateway(AFTR_V4_ELEMENT)
             .build();
 
         handle

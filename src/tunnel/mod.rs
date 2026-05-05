@@ -3,6 +3,9 @@ use thiserror::Error;
 
 // RFC 6333 5.7: AFTR element reserved address
 const AFTR_V4_ELEMENT: Ipv4Addr = Ipv4Addr::new(192, 0, 0, 1);
+// RFC 6333 5.7: B4 elements live in 192.0.0.0/29 (B4 hosts at .2..=.6,
+// AFTR at .1, .0 subnet, .7 broadcast).
+const B4_V4_PREFIX_LEN: u8 = 29;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

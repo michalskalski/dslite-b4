@@ -1,86 +1,31 @@
-use crate::tunnel::{AFTR_V4_ELEMENT, TunnelBackend, TunnelError};
+//! illumos backend, DS-Lite B4 tunnel via libdladm + libipadm + direct ioctls.
+//!
+//! Three layers of the illumos networking stack are used here:
+//! - libdladm: datalink/tunnel management (the iptun link itself).
+//! - libipadm: IP interface lifecycle (create/delete the IP interface
+//!   on top of the link).
+//! - kernel ioctls on a socket: IPv4 address assignment. Bypass
+//!   libipadm here because of illumos issue 17851, 32-bit `ipmgmtd`
+//!   ABI vs this 64-bit daemon.
+//!
+//! C-side bindings (constants, FFI, `repr(C)` mirrors) live in `sys.rs`.
+
+mod sys;
+
+use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, TunnelBackend, TunnelError};
+use std::io;
 use std::{
-    ffi::{CStr, CString, c_char, c_uint, c_void},
+    ffi::{CString, c_char, c_void},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
+use sys::*;
 
-const NI_MAXHOST: usize = 1025;
-const DLADM_STATUS_OK: u32 = 0;
-const IPADM_STATUS_OK: u32 = 0;
-const AF_INET: u16 = 2;
-const AF_UNSPEC: u16 = 0;
-const IPADM_ADDR_STATIC: u32 = 1;
-
-const IPTUN_PARAM_TYPE: c_uint = 0x00000001;
-const IPTUN_PARAM_LADDR: c_uint = 0x00000002;
-const IPTUN_PARAM_RADDR: c_uint = 0x00000004;
-const DLADM_OPT_ACTIVE: c_uint = 0x00000001;
-const IPADM_OPT_ACTIVE: u32 = 0x00000002;
-const IPADM_OPT_UP: u32 = 0x00001000;
-const IPADM_OPT_V46: u32 = 0x00002000;
-
-unsafe extern "C" {
-    fn dladm_open(handle: *mut *mut c_void) -> u32;
-    fn dladm_close(handle: *mut c_void);
-    fn dladm_iptun_create(
-        handle: *mut c_void,
-        name: *const c_char,
-        params: *mut IpTunParams,
-        flags: c_uint,
-    ) -> u32;
-    fn dladm_iptun_delete(handle: *mut c_void, link_id: u32, flags: c_uint) -> u32;
-    fn dladm_name2info(
-        handle: *mut c_void,
-        name: *const c_char,
-        linkid: *mut u32,
-        flags: *mut u32,
-        class: *mut u32,
-        media: *mut u32,
-    ) -> u32;
-    fn ipadm_open(handle: *mut *mut c_void, flags: u32) -> u32;
-    fn ipadm_close(handle: *mut c_void);
-    fn ipadm_create_if(handle: *mut c_void, name: *mut c_char, family: u16, flags: u32) -> u32;
-    fn ipadm_delete_if(handle: *mut c_void, name: *const c_char, family: u16, flags: u32) -> u32;
-    fn ipadm_create_addrobj(addrtype: u32, name: *const c_char, addrobj: *mut *mut c_void) -> u32;
-    fn ipadm_destroy_addrobj(addrobj: *mut c_void);
-    fn ipadm_set_addr(addrobj: *mut c_void, addr: *const c_char, family: u16) -> u32;
-    fn ipadm_set_dst_addr(addrobj: *mut c_void, addr: *const c_char, family: u16) -> u32;
-    fn ipadm_create_addr(handle: *mut c_void, addrobj: *mut c_void, flags: u32) -> u32;
-    fn ipadm_delete_addr(handle: *mut c_void, addr: *const c_char, flags: u32) -> u32;
-
-}
-
-#[repr(C)]
-struct IpsecReq {
-    ipsr_ah_req: c_uint,
-    ipsr_esp_req: c_uint,
-    ipsr_self_encap_req: c_uint,
-    ipsr_auth_alg: u8,
-    ipsr_esp_alg: u8,
-    ipsr_esp_auth_alg: u8,
-}
-
-#[repr(u32)]
-enum IpTunType {
-    Unknown = 0,
-    Ipv4 = 1,
-    Ipv6 = 2,
-    SixToFour = 3,
-}
-
-#[repr(C)]
-struct IpTunParams {
-    link_id: u32,
-    flags: c_uint,
-    ip_tun_type: IpTunType,
-    l_addr: [c_char; NI_MAXHOST],
-    r_addr: [c_char; NI_MAXHOST],
-    sec_info: IpsecReq,
-}
+// /29 -> 255.255.255.248
+const B4_V4_NETMASK: Ipv4Addr = Ipv4Addr::from_bits(u32::MAX << (32 - B4_V4_PREFIX_LEN));
 
 pub struct IllumosBackend {
     cname: CString,
-    aobjname: CString,
     local_v6: Ipv6Addr,
     remote_v6: Ipv6Addr,
     local_v4: Ipv4Addr,
@@ -93,12 +38,10 @@ impl IllumosBackend {
         remote_v6: Ipv6Addr,
         local_v4: Ipv4Addr,
     ) -> Result<Self, std::ffi::NulError> {
-        let aobjname = std::ffi::CString::new(format!("{}/v4", name))?;
         let cname = std::ffi::CString::new(name)?;
 
         Ok(Self {
             cname,
-            aobjname,
             local_v6,
             remote_v6,
             local_v4,
@@ -106,40 +49,87 @@ impl IllumosBackend {
     }
     fn create_tunnel(&self, handle: &DladmHandle) -> Result<u32, TunnelError> {
         let mut params = build_tunnel_params(&self.local_v6, &self.remote_v6);
-        unsafe {
-            let status = dladm_iptun_create(
+
+        // SAFETY:
+        // - `handle.ptr` was produced by a successful `dladm_open` (see
+        //   `open_dladm`) and remains live for the `&DladmHandle` borrow.
+        // - `self.cname.as_ptr()` returns a NUL-terminated `*const c_char`
+        //   from the `CString` field, valid for reads for the `&self`
+        //   borrow.
+        // - `&mut params` is a stack-local `IpTunParams` owned exclusively
+        //   here, valid for writes (libdladm populates `link_id`).
+        let status = unsafe {
+            dladm_iptun_create(
                 handle.ptr,
                 self.cname.as_ptr(),
                 &mut params,
                 DLADM_OPT_ACTIVE,
-            );
-            if status != DLADM_STATUS_OK {
-                return Err(TunnelError::CreationFailed(format!(
-                    "dladm_iptun_create failed with status {}",
-                    status
-                )));
-            }
+            )
         };
+        if status != DLADM_STATUS_OK {
+            return Err(TunnelError::CreationFailed(format!(
+                "dladm_iptun_create failed with status {}",
+                status
+            )));
+        }
         tracing::debug!(link_id = params.link_id, "tunnel created");
 
         Ok(params.link_id)
     }
 
     fn create_if(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
+        // libipadm may write back the canonical interface name into the
+        // buffer on success. The writeback happens unconditionally in
+        // `i_ipadm_plumb_if` (for the IPv6-type tunnel used here it is
+        // normally a no-op, but the API contract requires a writable
+        // LIFNAMSIZ buffer).
+        // <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/lib/libipadm/common/ipadm_if.c#L1105>
+        // Allocate a local buffer rather than aliasing the immutable
+        // `self.cname` storage. The post-call buffer contents are not
+        // read back.
+        let src = self.cname.as_bytes_with_nul();
+        if src.len() > LIFNAMSIZ {
+            return Err(TunnelError::CreationFailed(format!(
+                "interface name {} bytes, exceeds LIFNAMSIZ ({})",
+                src.len(),
+                LIFNAMSIZ
+            )));
+        }
+        let mut name_buf: [c_char; LIFNAMSIZ] = [0; LIFNAMSIZ];
+
+        // SAFETY:
+        // - `src` from `as_bytes_with_nul()` is a `&[u8]`, valid for
+        //   reads of `src.len()` bytes by the slice-reference guarantee.
+        // - `name_buf` is a stack-local `[c_char; LIFNAMSIZ]`, valid for
+        //   LIFNAMSIZ writes.
+        // - `src.len() <= LIFNAMSIZ` by the prior bounds check.
+        // - Both pointers are `u8`-typed. `align_of::<u8>() = 1`, satisfied.
+        // - `self.cname` and `name_buf` are distinct allocations, so the
+        //   regions cannot overlap.
         unsafe {
-            let status = ipadm_create_if(
-                handle.ptr,
-                self.cname.as_ptr() as *mut c_char,
-                AF_INET,
-                IPADM_OPT_ACTIVE,
-            );
-            if status != IPADM_STATUS_OK {
-                return Err(TunnelError::CreationFailed(format!(
-                    "ipadm_create_if failed with status {}",
-                    status
-                )));
-            }
+            std::ptr::copy_nonoverlapping(
+                src.as_ptr(),
+                name_buf.as_mut_ptr().cast::<u8>(),
+                src.len(),
+            )
         };
+
+        // SAFETY:
+        // - `handle.ptr` was produced by a successful `ipadm_open` (see
+        //   `open_ipadm`) and remains live for the `&IpadmHandle` borrow.
+        // - `name_buf.as_mut_ptr()` points to an initialized LIFNAMSIZ
+        //   buffer that the library may overwrite on success.
+        // - `name_buf` lives until function return, covering the call
+        //   duration.
+        let status = unsafe {
+            ipadm_create_if(handle.ptr, name_buf.as_mut_ptr(), AF_INET, IPADM_OPT_ACTIVE)
+        };
+        if status != IPADM_STATUS_OK {
+            return Err(TunnelError::CreationFailed(format!(
+                "ipadm_create_if failed with status {}",
+                status
+            )));
+        }
         tracing::debug!("ip interface assigned to tunel");
         Ok(())
     }
@@ -153,49 +143,56 @@ impl IllumosBackend {
             )));
         }
         tracing::debug!(link_id, "resolved link id for deletion");
-        unsafe {
-            let status = dladm_iptun_delete(handle.ptr, link_id, DLADM_OPT_ACTIVE);
-            if status != DLADM_STATUS_OK {
-                return Err(TunnelError::DestroyFailed(format!(
-                    "dladm_iptun_delete failed with status {}",
-                    status
-                )));
-            }
-        };
+
+        // SAFETY:
+        // - `handle.ptr` was produced by a successful `dladm_open` (see
+        //   `open_dladm`) and remains live for the `&DladmHandle` borrow.
+        // - `link_id` is a `u32` returned by `dladm_name2info` above,
+        //   identifying the link to delete.
+        let status = unsafe { dladm_iptun_delete(handle.ptr, link_id, DLADM_OPT_ACTIVE) };
+        if status != DLADM_STATUS_OK {
+            return Err(TunnelError::DestroyFailed(format!(
+                "dladm_iptun_delete failed with status {}",
+                status
+            )));
+        }
 
         Ok(())
     }
 
     fn delete_if(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
-        unsafe {
-            let status =
-                ipadm_delete_if(handle.ptr, self.cname.as_ptr(), AF_INET, IPADM_OPT_ACTIVE);
-            if status != IPADM_STATUS_OK {
-                return Err(TunnelError::DestroyFailed(format!(
-                    "ipadm_delete_if failed with status {}",
-                    status
-                )));
-            }
-        };
-        tracing::debug!("ip interface deleted");
-        Ok(())
-    }
-
-    fn delete_addr(&self, handle: &IpadmHandle) -> Result<(), TunnelError> {
-        unsafe {
-            let status = ipadm_delete_addr(handle.ptr, self.aobjname.as_ptr(), IPADM_OPT_ACTIVE);
-            if status != IPADM_STATUS_OK {
-                return Err(TunnelError::DestroyFailed(format!(
-                    "failed to destroy address, ipadm_delete_addr status {}",
-                    status,
-                )));
-            }
+        // SAFETY:
+        // - `handle.ptr` was produced by a successful `ipadm_open` (see
+        //   `open_ipadm`) and remains live for the `&IpadmHandle` borrow.
+        // - `self.cname.as_ptr()` returns a NUL-terminated `*const c_char`
+        //   from the `CString` field, valid for reads for the `&self`
+        //   borrow. `ipadm_delete_if` declares its name parameter `const`
+        //   and does not mutate the buffer.
+        let status =
+            unsafe { ipadm_delete_if(handle.ptr, self.cname.as_ptr(), AF_INET, IPADM_OPT_ACTIVE) };
+        if status != IPADM_STATUS_OK {
+            return Err(TunnelError::DestroyFailed(format!(
+                "ipadm_delete_if failed with status {}",
+                status
+            )));
         }
+        tracing::debug!("ip interface deleted");
         Ok(())
     }
 
     fn name_to_linkid(&self, handle: &DladmHandle) -> (u32, u32) {
         let mut link_id: u32 = 0;
+
+        // SAFETY:
+        // - `handle.ptr` was produced by a successful `dladm_open` (see
+        //   `open_dladm`) and remains live for the `&DladmHandle` borrow.
+        // - `self.cname.as_ptr()` returns a NUL-terminated `*const c_char`,
+        //   valid for reads for the `&self` borrow.
+        // - `&mut link_id` points to a stack-local `u32` valid for writes.
+        // - The remaining `flagp` / `classp` / `mediap` arguments are
+        //   explicitly null. `dladm_name2info` checks each out-pointer
+        //   against NULL before writing.
+        //   <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/lib/libdladm/common/libdlmgmt.c#L578>
         let status = unsafe {
             dladm_name2info(
                 handle.ptr,
@@ -220,41 +217,29 @@ impl TunnelBackend for IllumosBackend {
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, ipadm_open status {}", e))
         })?;
-        // self.create_if(&ip_handle)?;
+        self.create_if(&ip_handle)?;
 
-        let addrobj = IpadmAddrobj::new(IPADM_ADDR_STATIC, &self.aobjname).map_err(|e| {
-            TunnelError::CreationFailed(format!(
-                "unable to crate addrobj, ipadm_create_addrobj status {}",
-                e
-            ))
-        })?;
+        let sock_fd = open_inet_dgram_socket()?;
+        let fd = sock_fd.as_raw_fd();
 
-        let laddr = std::ffi::CString::new(self.local_v4.to_string()).unwrap();
-        addrobj.set_addr(laddr.as_c_str(), AF_UNSPEC).map_err(|e| {
-            TunnelError::CreationFailed(format!(
-                "unable to set local address, ipadm_set_addr status {}",
-                e
-            ))
-        })?;
+        // The four calls below each require an fd that accepts SIOCSLIF*
+        // ioctls. `open_inet_dgram_socket` returns an AF_INET/SOCK_DGRAM
+        // socket, the standard choice on illumos. `sock_fd` (the
+        // `OwnedFd`) lives until function return, so `fd` remains valid
+        // across all four calls.
 
-        let raddr = std::ffi::CString::new(AFTR_V4_ELEMENT.to_string()).unwrap();
-        addrobj
-            .set_dst_addr(raddr.as_c_str(), AF_UNSPEC)
-            .map_err(|e| {
-                TunnelError::CreationFailed(format!(
-                    "unable to set remote address, ipadm_set_dst_addr status {}",
-                    e
-                ))
-            })?;
-
-        addrobj
-            .commit(&ip_handle, IPADM_OPT_ACTIVE | IPADM_OPT_UP | IPADM_OPT_V46)
-            .map_err(|e| {
-                TunnelError::CreationFailed(format!(
-                    "unable to commit new address settings, ipadm_create_addr status {}",
-                    e
-                ))
-            })?;
+        // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
+        unsafe { set_local_addr(fd, &self.cname, self.local_v4) }
+            .map_err(|e| TunnelError::CreationFailed(format!("set_local_addr: {}", e)))?;
+        // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
+        unsafe { set_dst_addr(fd, &self.cname, AFTR_V4_ELEMENT) }
+            .map_err(|e| TunnelError::CreationFailed(format!("set_dst_addr: {}", e)))?;
+        // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
+        unsafe { set_netmask(fd, &self.cname, B4_V4_NETMASK) }
+            .map_err(|e| TunnelError::CreationFailed(format!("set_netmask: {}", e)))?;
+        // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
+        unsafe { bring_up(fd, &self.cname) }
+            .map_err(|e| TunnelError::CreationFailed(format!("bring_up: {}", e)))?;
 
         tracing::info!(
             name = %self.cname.to_string_lossy(),
@@ -271,7 +256,15 @@ impl TunnelBackend for IllumosBackend {
             TunnelError::DestroyFailed(format!("unable to open handle, ipadm_open status {}", e))
         })?;
 
-        self.delete_addr(&ip_handle)?;
+        // clear the address
+        let sock_fd = open_inet_dgram_socket()?;
+        let fd = sock_fd.as_raw_fd();
+
+        // SAFETY: `fd` is a fresh AF_INET/SOCK_DGRAM socket from
+        // `open_inet_dgram_socket`, which is suitable for SIOCSLIF*.
+        // `sock_fd` lives until function return.
+        unsafe { set_local_addr(fd, &self.cname, Ipv4Addr::UNSPECIFIED) }
+            .map_err(|e| TunnelError::DestroyFailed(format!("zero local_v4: {}", e)))?;
 
         self.delete_if(&ip_handle)?;
 
@@ -293,76 +286,67 @@ impl TunnelBackend for IllumosBackend {
     }
 }
 
+/// RAII wrapper for a libdladm handle.
+///
+/// # Invariants
+///
+/// - `ptr` is non-null and points to a libdladm handle obtained from a
+///   successful `dladm_open`. libdladm only returns `DLADM_STATUS_OK`
+///   after writing a non-null, malloc-allocated handle into `*handle`.
+///   <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/lib/libdladm/common/libdladm.c#L127-L136>
+/// - The handle is exclusively owned by this instance and closed
+///   exactly once via `dladm_close` on `Drop`.
+///
+/// # Threading
+///
+/// `!Send` and `!Sync` (raw pointer field). libdladm caches a per-handle
+/// `door_fd` that is opened on demand and not safe to share across
+/// threads. Use a per-thread handle if cross-thread access is needed.
 struct DladmHandle {
     ptr: *mut c_void,
 }
 
 impl Drop for DladmHandle {
     fn drop(&mut self) {
+        // SAFETY:
+        // - `self.ptr` is a live libdladm handle (struct invariant).
+        // - `dladm_close` is the matching destructor for `dladm_open`.
+        // - `Drop::drop` runs exactly once per instance, so the handle
+        //   is closed exactly once.
         unsafe { dladm_close(self.ptr) };
     }
 }
 
+/// RAII wrapper for a libipadm handle.
+///
+/// # Invariants
+///
+/// - `ptr` is non-null and points to a libipadm handle obtained from a
+///   successful `ipadm_open`. libipadm sets `*handle` to NULL up front
+///   and only assigns a non-null calloc-allocated handle on the success
+///   path that returns `IPADM_SUCCESS`.
+///   <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/lib/libipadm/common/libipadm.c#L181-L264>
+/// - The handle is exclusively owned by this instance and closed
+///   exactly once via `ipadm_close` on `Drop`.
+///
+/// # Threading
+///
+/// `!Send` and `!Sync` (raw pointer field). libipadm holds an internal
+/// mutex but also caches sockets and a door fd per handle. Treat the
+/// handle as single-thread-owned. Use a per-thread handle if cross-thread
+/// access is needed.
 struct IpadmHandle {
     ptr: *mut c_void,
 }
 
 impl Drop for IpadmHandle {
     fn drop(&mut self) {
+        // SAFETY:
+        // - `self.ptr` is a live libipadm handle (struct invariant).
+        // - `ipadm_close` is the matching destructor for `ipadm_open`.
+        // - `Drop::drop` runs exactly once per instance, so the handle
+        //   is closed exactly once.
         unsafe { ipadm_close(self.ptr) };
-    }
-}
-
-struct IpadmAddrobj {
-    ptr: *mut c_void,
-}
-
-impl IpadmAddrobj {
-    fn new(addr_type: u32, aobjname: &CStr) -> Result<Self, u32> {
-        let mut ptr: *mut c_void = std::ptr::null_mut();
-        let status = unsafe { ipadm_create_addrobj(addr_type, aobjname.as_ptr(), &mut ptr) };
-        if status != IPADM_STATUS_OK {
-            return Err(status);
-        }
-        Ok(Self { ptr })
-    }
-
-    fn set_addr(&self, addr: &CStr, family: u16) -> Result<(), u32> {
-        unsafe {
-            let status = ipadm_set_addr(self.ptr, addr.as_ptr(), family);
-            if status != IPADM_STATUS_OK {
-                return Err(status);
-            }
-        }
-        Ok(())
-    }
-
-    fn set_dst_addr(&self, addr: &CStr, family: u16) -> Result<(), u32> {
-        unsafe {
-            let status = ipadm_set_dst_addr(self.ptr, addr.as_ptr(), family);
-            if status != IPADM_STATUS_OK {
-                return Err(status);
-            }
-        }
-        Ok(())
-    }
-
-    fn commit(&self, handle: &IpadmHandle, flags: u32) -> Result<(), u32> {
-        unsafe {
-            let status = ipadm_create_addr(handle.ptr, self.ptr, flags);
-            if status != IPADM_STATUS_OK {
-                return Err(status);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Drop for IpadmAddrobj {
-    fn drop(&mut self) {
-        unsafe {
-            ipadm_destroy_addrobj(self.ptr);
-        };
     }
 }
 
@@ -397,18 +381,47 @@ fn build_tunnel_params(local: &Ipv6Addr, remote: &Ipv6Addr) -> IpTunParams {
 
 fn open_dladm() -> Result<DladmHandle, u32> {
     let mut ptr: *mut c_void = std::ptr::null_mut();
+    // SAFETY: FFI call with no outstanding preconditions.
     let status = unsafe { dladm_open(&mut ptr) };
     if status != DLADM_STATUS_OK {
         return Err(status);
     }
+    // `DLADM_STATUS_OK` implies `ptr` is non-null (see `DladmHandle`
+    // invariants), so constructing the wrapper here establishes both
+    // struct invariants.
     Ok(DladmHandle { ptr })
 }
 
 fn open_ipadm() -> Result<IpadmHandle, u32> {
     let mut ptr: *mut c_void = std::ptr::null_mut();
+    // SAFETY: FFI call with no outstanding preconditions.
     let status = unsafe { ipadm_open(&mut ptr, 0) };
     if status != IPADM_STATUS_OK {
         return Err(status);
     }
+    // `IPADM_SUCCESS` implies `ptr` is non-null (see `IpadmHandle`
+    // invariants), so constructing the wrapper here establishes both
+    // struct invariants.
     Ok(IpadmHandle { ptr })
+}
+
+fn open_inet_dgram_socket() -> Result<OwnedFd, TunnelError> {
+    // SAFETY: FFI call with no outstanding preconditions.
+    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+
+    if raw == -1 {
+        return Err(TunnelError::CreationFailed(format!(
+            "unable to open socket: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    // SAFETY:
+    // - `raw` was returned by `libc::socket` and is non-negative
+    //   (the prior `== -1` check rejects the error case), so it is a
+    //   valid open file descriptor.
+    // - `raw` was created by the call above and has not been observed
+    //   by any other code, so this `from_raw_fd` is the sole owner.
+    // - The returned `OwnedFd` will close the descriptor on drop.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
