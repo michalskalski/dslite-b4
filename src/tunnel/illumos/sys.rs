@@ -1,7 +1,7 @@
 //! illumos C ABI bindings: constants, FFI declarations, and `repr(C)`
 //! struct mirrors.
 use std::{
-    ffi::{CStr, c_char, c_int, c_uint, c_void},
+    ffi::{CStr, c_char, c_int, c_uchar, c_uint, c_ushort, c_void},
     io,
     mem::MaybeUninit,
     net::Ipv4Addr,
@@ -452,4 +452,72 @@ pub unsafe fn bring_up(sock_fd: c_int, name: &CStr) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+// PF_ROUTE <net/route.h>
+
+// Typed to match the destination fields in rt_msghdr
+pub const RTM_VERSION: c_uchar = 3;
+pub const RTM_ADD: c_uchar = 0x1;
+pub const RTM_DELETE: c_uchar = 0x2;
+pub const RTM_GET: c_uchar = 0x4;
+
+pub const RTF_UP: c_int = 0x1;
+pub const RTF_GATEWAY: c_int = 0x2;
+pub const RTF_STATIC: c_int = 0x800;
+
+pub const RTA_DST: c_int = 0x1;
+pub const RTA_GATEWAY: c_int = 0x2;
+pub const RTA_NETMASK: c_int = 0x4;
+pub const RTA_IFP: c_int = 0x10;
+pub const RTA_IFA: c_int = 0x20;
+
+/// Routing metrics carried inside `rt_msghdr` (10 × u32, 40 bytes).
+/// <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/uts/common/net/route.h#L72-L84>
+#[derive(Default)]
+#[repr(C)]
+pub struct rt_metrics {
+    pub rmx_locks: u32,
+    pub rmx_mtu: u32,
+    pub rmx_hopcount: u32,
+    pub rmx_expire: u32,
+    pub rmx_recvpipe: u32,
+    pub rmx_sendpipe: u32,
+    pub rmx_ssthresh: u32,
+    pub rmx_rtt: u32,
+    pub rmx_rttvar: u32,
+    pub rmx_pksent: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<rt_metrics>() == 40);
+
+/// <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/uts/common/net/route.h#L152-L165>
+#[derive(Default)]
+#[repr(C)]
+pub struct rt_msghdr {
+    pub rtm_msglen: c_ushort,
+    pub rtm_version: c_uchar,
+    pub rtm_type: c_uchar,
+    pub rtm_index: c_ushort,
+    pub rtm_flags: c_int,
+    pub rtm_addrs: c_int,
+    pub rtm_pid: c_int,
+    pub rtm_seq: c_int,
+    pub rtm_errno: c_int,
+    pub rtm_use: c_int,
+    pub rtm_inits: c_uint,
+    pub rtm_rmx: rt_metrics,
+}
+
+const _: () = assert!(std::mem::size_of::<rt_msghdr>() == 76);
+
+pub fn sockaddr_in_v4(addr: Ipv4Addr) -> libc::sockaddr_in {
+    libc::sockaddr_in {
+        sin_family: libc::AF_INET as u16,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(addr).to_be(),
+        },
+        sin_zero: [0; 8],
+    }
 }

@@ -10,8 +10,10 @@
 //!
 //! C-side bindings (constants, FFI, `repr(C)` mirrors) live in `sys.rs`.
 
+mod pf_route;
 mod sys;
 
+use crate::tunnel::illumos::pf_route::RouteSocket;
 use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, TunnelBackend, TunnelError};
 use std::io;
 use std::{
@@ -240,6 +242,11 @@ impl TunnelBackend for IllumosBackend {
         // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
         unsafe { bring_up(fd, &self.cname) }
             .map_err(|e| TunnelError::CreationFailed(format!("bring_up: {}", e)))?;
+        let route_sock = RouteSocket::open()
+            .map_err(|e| TunnelError::CreationFailed(format!("PF_ROUTE open: {e}")))?;
+        route_sock
+            .add_default_v4(AFTR_V4_ELEMENT)
+            .map_err(|e| TunnelError::CreationFailed(format!("add default route: {e}")))?;
 
         tracing::info!(
             name = %self.cname.to_string_lossy(),
@@ -265,6 +272,18 @@ impl TunnelBackend for IllumosBackend {
         // `sock_fd` lives until function return.
         unsafe { set_local_addr(fd, &self.cname, Ipv4Addr::UNSPECIFIED) }
             .map_err(|e| TunnelError::DestroyFailed(format!("zero local_v4: {}", e)))?;
+
+        let route_sock = RouteSocket::open()
+            .map_err(|e| TunnelError::DestroyFailed(format!("PF_ROUTE open: {e}")))?;
+        if let Err(e) = route_sock.delete_default_v4(AFTR_V4_ELEMENT) {
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                tracing::warn!(error = %e, "default route already gone");
+            } else {
+                return Err(TunnelError::DestroyFailed(format!(
+                    "delete default route: {e}"
+                )));
+            }
+        }
 
         self.delete_if(&ip_handle)?;
 
