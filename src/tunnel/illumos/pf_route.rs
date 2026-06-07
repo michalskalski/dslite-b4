@@ -167,16 +167,19 @@ impl RouteSocket {
             if hdr.rtm_errno != 0 {
                 return Err(io::Error::from_raw_os_error(hdr.rtm_errno));
             };
-            tracing::debug!("default route installed");
             return Ok(());
         }
     }
 
     pub fn add_default_v4(&self, gateway: Ipv4Addr) -> io::Result<()> {
-        self.send_default_route(RTM_ADD, gateway)
+        self.send_default_route(RTM_ADD, gateway)?;
+        tracing::debug!("tunnel default route installed");
+        Ok(())
     }
 
     pub fn delete_default_v4(&self, gateway: Ipv4Addr) -> io::Result<()> {
-        self.send_default_route(RTM_DELETE, gateway)
+        self.send_default_route(RTM_DELETE, gateway)?;
+        tracing::debug!("tunnel default route removed");
+        Ok(())
     }
 }

@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 None => {
                     let mut attempt: u64 = 0;
                     loop {
-                        match dslite_b4::discovery::discover_local_v6(aftr_ip).await {
+                        match dslite_b4::discovery::discover_local_v6(aftr_ip) {
                             Ok(addr) => {
                                 if attempt > 0 {
                                     tracing::info!(%addr, attempt, "local_v6 discovered after {attempt} attempts");

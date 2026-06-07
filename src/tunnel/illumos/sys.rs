@@ -460,7 +460,6 @@ pub unsafe fn bring_up(sock_fd: c_int, name: &CStr) -> io::Result<()> {
 pub const RTM_VERSION: c_uchar = 3;
 pub const RTM_ADD: c_uchar = 0x1;
 pub const RTM_DELETE: c_uchar = 0x2;
-pub const RTM_GET: c_uchar = 0x4;
 
 pub const RTF_UP: c_int = 0x1;
 pub const RTF_GATEWAY: c_int = 0x2;
@@ -469,8 +468,6 @@ pub const RTF_STATIC: c_int = 0x800;
 pub const RTA_DST: c_int = 0x1;
 pub const RTA_GATEWAY: c_int = 0x2;
 pub const RTA_NETMASK: c_int = 0x4;
-pub const RTA_IFP: c_int = 0x10;
-pub const RTA_IFA: c_int = 0x20;
 
 /// Routing metrics carried inside `rt_msghdr` (10 × u32, 40 bytes).
 /// <https://github.com/illumos/illumos-gate/blob/0764e87f4a667f36d63262fcdd690064929acc48/usr/src/uts/common/net/route.h#L72-L84>
