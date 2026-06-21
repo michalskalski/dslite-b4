@@ -14,7 +14,7 @@ mod pf_route;
 mod sys;
 
 use crate::tunnel::illumos::pf_route::RouteSocket;
-use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, TunnelBackend, TunnelError};
+use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, Observed, TunnelBackend, TunnelError};
 use std::io;
 use std::{
     ffi::{CString, c_char, c_void},
@@ -300,8 +300,8 @@ impl TunnelBackend for IllumosBackend {
         Ok(())
     }
 
-    async fn is_up(&self) -> Result<bool, TunnelError> {
-        Ok(false)
+    async fn observe(&self) -> Result<Observed, TunnelError> {
+        Ok(Observed::Absent)
     }
 }
 

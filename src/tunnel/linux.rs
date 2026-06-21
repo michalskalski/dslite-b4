@@ -1,13 +1,63 @@
-use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, TunnelBackend, TunnelError};
+use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, Observed, TunnelBackend, TunnelError};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{
     Handle, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder, new_connection,
     packet_route::{
         IpProtocol,
-        link::{InfoData, InfoIpTunnel, InfoKind, Ip6TunnelFlags, LinkFlags},
+        link::{
+            InfoData, InfoIpTunnel, InfoKind, Ip6TunnelFlags, LinkAttribute, LinkFlags, LinkInfo,
+            LinkMessage,
+        },
     },
 };
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+fn observed_from_link(link: &LinkMessage) -> Result<Observed, TunnelError> {
+    let admin_up = link.header.flags.contains(LinkFlags::Up);
+    let mut local_v6 = None;
+    let mut remote_v6 = None;
+
+    for attribute in &link.attributes {
+        let LinkAttribute::LinkInfo(link_info) = attribute else {
+            continue;
+        };
+
+        for info in link_info {
+            let LinkInfo::Data(InfoData::IpTunnel(tunnel_info)) = info else {
+                continue;
+            };
+
+            for info in tunnel_info {
+                match info {
+                    InfoIpTunnel::Local(IpAddr::V6(addr)) => local_v6 = Some(*addr),
+                    InfoIpTunnel::Remote(IpAddr::V6(addr)) => remote_v6 = Some(*addr),
+                    InfoIpTunnel::Local(addr) => {
+                        return Err(TunnelError::StatusCheckFailed(format!(
+                            "expected local IPv6 addr, got: {addr}"
+                        )));
+                    }
+                    InfoIpTunnel::Remote(addr) => {
+                        return Err(TunnelError::StatusCheckFailed(format!(
+                            "expected remote IPv6 addr, got: {addr}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match (local_v6, remote_v6) {
+        (Some(local_v6), Some(remote_v6)) => Ok(Observed::Present {
+            local_v6,
+            remote_v6,
+            admin_up,
+        }),
+        _ => Err(TunnelError::StatusCheckFailed(format!(
+            "tunnel endpoint missing, local={local_v6:?}, remote={remote_v6:?}"
+        ))),
+    }
+}
 
 pub struct LinuxBackend {
     name: String,
@@ -138,14 +188,94 @@ impl TunnelBackend for LinuxBackend {
             .inspect(|_| tracing::info!(name=%self.name, "interface removed"))
     }
 
-    async fn is_up(&self) -> Result<bool, TunnelError> {
+    async fn observe(&self) -> Result<Observed, TunnelError> {
         let handle = Self::open_handle()?;
 
         let mut links = handle.link().get().match_name(self.name.clone()).execute();
         match links.try_next().await {
-            Ok(Some(link)) => Ok(link.header.flags.contains(LinkFlags::Up)),
-            Ok(None) => Ok(false),
+            Ok(Some(link)) => observed_from_link(&link),
+            Ok(None) => Ok(Observed::Absent),
             Err(e) => Err(TunnelError::StatusCheckFailed(e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tunnel_link(local: IpAddr, remote: IpAddr, admin_up: bool) -> LinkMessage {
+        let mut link = LinkMessage::default();
+        if admin_up {
+            link.header.flags.insert(LinkFlags::Up);
+        }
+        link.attributes = vec![LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Ip6Tnl),
+            LinkInfo::Data(InfoData::IpTunnel(vec![
+                InfoIpTunnel::Local(local),
+                InfoIpTunnel::Remote(remote),
+            ])),
+        ])];
+        link
+    }
+
+    #[test]
+    fn extracts_endpoints_and_admin_state_from_link() {
+        let local_v6 = "2001:db8:1::1".parse().unwrap();
+        let remote_v6 = "2001:db8:1::2".parse().unwrap();
+        let link = tunnel_link(IpAddr::V6(local_v6), IpAddr::V6(remote_v6), true);
+
+        let observed = observed_from_link(&link).unwrap();
+
+        assert_eq!(
+            observed,
+            Observed::Present {
+                local_v6,
+                remote_v6,
+                admin_up: true,
+            }
+        );
+    }
+
+    #[test]
+    fn reports_missing_remote_endpoint() {
+        let local_v6 = "2001:db8:1::1".parse().unwrap();
+        let mut link = tunnel_link(
+            IpAddr::V6(local_v6),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            false,
+        );
+        let LinkAttribute::LinkInfo(link_info) = &mut link.attributes[0] else {
+            unreachable!();
+        };
+        let LinkInfo::Data(InfoData::IpTunnel(tunnel_info)) = &mut link_info[1] else {
+            unreachable!();
+        };
+        tunnel_info.retain(|info| !matches!(info, InfoIpTunnel::Remote(_)));
+
+        let error = observed_from_link(&link).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "checking tunnel status: tunnel endpoint missing, local=Some({local_v6}), remote=None"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_ipv4_endpoint() {
+        let link = tunnel_link(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V6("2001:db8:1::2".parse().unwrap()),
+            true,
+        );
+
+        let error = observed_from_link(&link).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "checking tunnel status: expected local IPv6 addr, got: 192.0.2.1"
+        );
     }
 }

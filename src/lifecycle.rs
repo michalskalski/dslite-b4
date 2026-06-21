@@ -1,17 +1,9 @@
+use crate::tunnel::Observed;
 use std::net::Ipv6Addr;
 
 struct DesiredEndpoints {
     local_v6: Ipv6Addr,
     remote_v6: Ipv6Addr,
-}
-
-enum Observed {
-    Absent,
-    Present {
-        local_v6: Ipv6Addr,
-        remote_v6: Ipv6Addr,
-        admin_up: bool,
-    },
 }
 
 enum Desired {

@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 // RFC 6333 5.7: AFTR element reserved address
@@ -12,6 +12,16 @@ pub mod linux;
 
 #[cfg(target_os = "illumos")]
 pub mod illumos;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Observed {
+    Absent,
+    Present {
+        local_v6: Ipv6Addr,
+        remote_v6: Ipv6Addr,
+        admin_up: bool,
+    },
+}
 
 #[derive(Debug, Error)]
 pub enum TunnelError {
@@ -30,5 +40,5 @@ pub enum TunnelError {
 pub trait TunnelBackend: Send + Sync {
     fn setup(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
-    fn is_up(&self) -> impl Future<Output = Result<bool, TunnelError>> + Send;
+    fn observe(&self) -> impl Future<Output = Result<Observed, TunnelError>> + Send;
 }
