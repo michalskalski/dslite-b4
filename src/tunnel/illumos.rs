@@ -300,6 +300,18 @@ impl TunnelBackend for IllumosBackend {
         Ok(())
     }
 
+    async fn bring_up(&self) -> Result<(), TunnelError> {
+        let socket = open_inet_dgram_socket().map_err(|e| {
+            TunnelError::BringUpFailed(format!("opening interface flags socket: {e}"))
+        })?;
+        let fd = socket.as_raw_fd();
+
+        // SAFETY: `fd` belongs to the live AF_INET/SOCK_DGRAM `socket`,
+        // which accepts SIOCSLIF* ioctls.
+        unsafe { sys::bring_up(fd, &self.cname) }
+            .map_err(|e| TunnelError::BringUpFailed(format!("setting interface flags: {e}")))
+    }
+
     async fn teardown(&self) -> Result<(), TunnelError> {
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::DestroyFailed(format!("unable to open handle, ipadm_open status {}", e))
@@ -623,6 +635,33 @@ mod tests {
                 local_v6,
                 remote_v6,
                 admin_up,
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires tunnel state prepared by scripts/test-illumos-observe.sh"]
+    async fn brings_up_illumos_tunnel() {
+        let name = std::env::var("DSLITE_TEST_TUNNEL")
+            .expect("DSLITE_TEST_TUNNEL must name the prepared test tunnel");
+        let local_v6 = std::env::var("DSLITE_TEST_LOCAL_V6")
+            .expect("DSLITE_TEST_LOCAL_V6 must contain the prepared local endpoint")
+            .parse()
+            .expect("DSLITE_TEST_LOCAL_V6 must be an IPv6 address");
+        let remote_v6 = std::env::var("DSLITE_TEST_REMOTE_V6")
+            .expect("DSLITE_TEST_REMOTE_V6 must contain the prepared remote endpoint")
+            .parse()
+            .expect("DSLITE_TEST_REMOTE_V6 must be an IPv6 address");
+        let backend = IllumosBackend::new(name).unwrap();
+
+        backend.bring_up().await.unwrap();
+
+        assert_eq!(
+            backend.observe().await.unwrap(),
+            Observed::Present {
+                local_v6,
+                remote_v6,
+                admin_up: true,
             }
         );
     }

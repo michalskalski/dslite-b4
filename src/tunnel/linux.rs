@@ -70,9 +70,8 @@ impl LinuxBackend {
         Self { name }
     }
 
-    fn open_handle() -> Result<Handle, TunnelError> {
-        let (connection, handle, _) =
-            new_connection().map_err(|e| TunnelError::CreationFailed(e.to_string()))?;
+    fn open_handle() -> std::io::Result<Handle> {
+        let (connection, handle, _) = new_connection()?;
         tokio::spawn(connection);
         Ok(handle)
     }
@@ -154,7 +153,8 @@ impl LinuxBackend {
 
 impl TunnelBackend for LinuxBackend {
     async fn setup(&self, desired: &DesiredState) -> Result<(), TunnelError> {
-        let handle = Self::open_handle()?;
+        let handle = Self::open_handle()
+            .map_err(|e| TunnelError::CreationFailed(format!("opening netlink connection: {e}")))?;
 
         let index = self.create_tunnel(&handle, desired).await?;
         self.add_address(&handle, index, desired.local_v4).await?;
@@ -171,8 +171,48 @@ impl TunnelBackend for LinuxBackend {
         Ok(())
     }
 
+    async fn bring_up(&self) -> Result<(), TunnelError> {
+        let handle = Self::open_handle()
+            .map_err(|e| TunnelError::BringUpFailed(format!("opening netlink connection: {e}")))?;
+
+        let index = self
+            .get_link_index(&handle)
+            .await
+            .map_err(|e| TunnelError::BringUpFailed(e.to_string()))?
+            .ok_or_else(|| {
+                TunnelError::BringUpFailed(format!("interface {} not found", self.name))
+            })?;
+
+        let message = LinkMessageBuilder::<LinkUnspec>::default()
+            .index(index)
+            .up()
+            .build();
+
+        handle
+            .link()
+            .change(message)
+            .execute()
+            .await
+            .map_err(|e| TunnelError::BringUpFailed(e.to_string()))
+            .inspect(|_| tracing::info!(name = %self.name, "interface brought up"))
+    }
+
+    async fn observe(&self) -> Result<Observed, TunnelError> {
+        let handle = Self::open_handle().map_err(|e| {
+            TunnelError::StatusCheckFailed(format!("opening netlink connection: {e}"))
+        })?;
+
+        let mut links = handle.link().get().match_name(self.name.clone()).execute();
+        match links.try_next().await {
+            Ok(Some(link)) => observed_from_link(&link),
+            Ok(None) => Ok(Observed::Absent),
+            Err(e) => Err(TunnelError::StatusCheckFailed(e.to_string())),
+        }
+    }
+
     async fn teardown(&self) -> Result<(), TunnelError> {
-        let handle = Self::open_handle()?;
+        let handle = Self::open_handle()
+            .map_err(|e| TunnelError::DestroyFailed(format!("opening netlink connection: {e}")))?;
 
         let index = self
             .get_link_index(&handle)
@@ -189,17 +229,6 @@ impl TunnelBackend for LinuxBackend {
             .await
             .map_err(|e| TunnelError::DestroyFailed(e.to_string()))
             .inspect(|_| tracing::info!(name=%self.name, "interface removed"))
-    }
-
-    async fn observe(&self) -> Result<Observed, TunnelError> {
-        let handle = Self::open_handle()?;
-
-        let mut links = handle.link().get().match_name(self.name.clone()).execute();
-        match links.try_next().await {
-            Ok(Some(link)) => observed_from_link(&link),
-            Ok(None) => Ok(Observed::Absent),
-            Err(e) => Err(TunnelError::StatusCheckFailed(e.to_string())),
-        }
     }
 }
 

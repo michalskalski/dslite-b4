@@ -42,11 +42,14 @@ pub enum TunnelError {
     RouteFailed(String),
     #[error("checking tunnel status: {0}")]
     StatusCheckFailed(String),
+    #[error("bring up tunnel: {0}")]
+    BringUpFailed(String),
 }
 
 pub trait TunnelBackend: Send + Sync {
     fn setup(&self, desired: &DesiredState)
     -> impl Future<Output = Result<(), TunnelError>> + Send;
-    fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
+    fn bring_up(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn observe(&self) -> impl Future<Output = Result<Observed, TunnelError>> + Send;
+    fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
 }

@@ -34,6 +34,14 @@ run_observe_test()
         cargo test observes_illumos_tunnel -- --ignored --nocapture
 }
 
+run_bring_up_test()
+{
+    DSLITE_TEST_TUNNEL=$TUNNEL \
+    DSLITE_TEST_LOCAL_V6=$LOCAL_V6 \
+    DSLITE_TEST_REMOTE_V6=$REMOTE_V6 \
+        cargo test brings_up_illumos_tunnel -- --ignored --nocapture
+}
+
 trap cleanup EXIT HUP INT TERM
 cleanup
 
@@ -49,6 +57,7 @@ run_observe_test present-up
 
 ifconfig "$TUNNEL" down
 run_observe_test present-down
+run_bring_up_test
 
 delete_test_tunnel
 run_observe_test absent
