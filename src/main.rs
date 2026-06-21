@@ -5,6 +5,7 @@ use dslite_b4::tunnel::linux::LinuxBackend;
 use dslite_b4::{
     config::Config,
     dns::resolve,
+    lifecycle::{Desired, reconcile_once},
     tunnel::{DesiredState, TunnelBackend},
 };
 use std::{path::PathBuf, time::Duration};
@@ -79,11 +80,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             };
-            let desired = DesiredState {
+            let desired_state = DesiredState {
                 local_v6,
                 remote_v6: aftr_ip,
                 local_v4: config.tunnel.local_v4,
             };
+            let desired = Desired::Resolved(desired_state);
 
             #[cfg(target_os = "linux")]
             let backend = LinuxBackend::new(config.tunnel.name);
@@ -96,8 +98,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run<B: TunnelBackend>(backend: B, desired: DesiredState) -> anyhow::Result<()> {
-    backend.setup(&desired).await?;
+async fn run<B: TunnelBackend>(backend: B, desired: Desired) -> anyhow::Result<()> {
+    let action = reconcile_once(&backend, &desired).await?;
+    tracing::info!(?action, "reconciliation completed");
 
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     tokio::select! {

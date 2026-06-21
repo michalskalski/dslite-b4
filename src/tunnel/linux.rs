@@ -97,7 +97,6 @@ impl LinuxBackend {
                 InfoIpTunnel::Ipv6Flags(Ip6TunnelFlags::IgnEncapLimit), // TODO: make configurable
             ]))
             .name(self.name.clone())
-            .mtu(1280)
             .up()
             .build();
 
@@ -152,11 +151,11 @@ impl LinuxBackend {
 }
 
 impl TunnelBackend for LinuxBackend {
-    async fn setup(&self, desired: &DesiredState) -> Result<(), TunnelError> {
+    async fn setup(&self, desired: DesiredState) -> Result<(), TunnelError> {
         let handle = Self::open_handle()
             .map_err(|e| TunnelError::CreationFailed(format!("opening netlink connection: {e}")))?;
 
-        let index = self.create_tunnel(&handle, desired).await?;
+        let index = self.create_tunnel(&handle, &desired).await?;
         self.add_address(&handle, index, desired.local_v4).await?;
         self.add_default_route(&handle, index).await?;
 
@@ -206,6 +205,11 @@ impl TunnelBackend for LinuxBackend {
         match links.try_next().await {
             Ok(Some(link)) => observed_from_link(&link),
             Ok(None) => Ok(Observed::Absent),
+            Err(rtnetlink::Error::NetlinkError(message))
+                if message.to_io().raw_os_error() == Some(libc::ENODEV) =>
+            {
+                Ok(Observed::Absent)
+            }
             Err(e) => Err(TunnelError::StatusCheckFailed(e.to_string())),
         }
     }

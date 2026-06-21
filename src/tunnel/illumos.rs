@@ -249,11 +249,11 @@ impl IllumosBackend {
 }
 
 impl TunnelBackend for IllumosBackend {
-    async fn setup(&self, desired: &DesiredState) -> Result<(), TunnelError> {
+    async fn setup(&self, desired: DesiredState) -> Result<(), TunnelError> {
         let handle = open_dladm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, dladm_open status {}", e))
         })?;
-        let _link_id = self.create_tunnel(&handle, desired)?;
+        let _link_id = self.create_tunnel(&handle, &desired)?;
 
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, ipadm_open status {}", e))

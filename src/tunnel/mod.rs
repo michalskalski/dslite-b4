@@ -13,7 +13,7 @@ pub mod linux;
 #[cfg(target_os = "illumos")]
 pub mod illumos;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Observed {
     Absent,
     Present {
@@ -47,8 +47,7 @@ pub enum TunnelError {
 }
 
 pub trait TunnelBackend: Send + Sync {
-    fn setup(&self, desired: &DesiredState)
-    -> impl Future<Output = Result<(), TunnelError>> + Send;
+    fn setup(&self, desired: DesiredState) -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn bring_up(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn observe(&self) -> impl Future<Output = Result<Observed, TunnelError>> + Send;
     fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
