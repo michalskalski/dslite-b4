@@ -1,4 +1,6 @@
-use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, Observed, TunnelBackend, TunnelError};
+use crate::tunnel::{
+    AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, DesiredState, Observed, TunnelBackend, TunnelError,
+};
 use futures_util::stream::TryStreamExt;
 use rtnetlink::{
     Handle, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder, new_connection,
@@ -10,7 +12,7 @@ use rtnetlink::{
         },
     },
 };
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 fn observed_from_link(link: &LinkMessage) -> Result<Observed, TunnelError> {
     let admin_up = link.header.flags.contains(LinkFlags::Up);
@@ -61,19 +63,11 @@ fn observed_from_link(link: &LinkMessage) -> Result<Observed, TunnelError> {
 
 pub struct LinuxBackend {
     name: String,
-    local_v6: Ipv6Addr,
-    remote_v6: Ipv6Addr,
-    local_v4: Ipv4Addr,
 }
 
 impl LinuxBackend {
-    pub fn new(name: String, local_v6: Ipv6Addr, remote_v6: Ipv6Addr, local_v4: Ipv4Addr) -> Self {
-        Self {
-            name,
-            local_v6,
-            remote_v6,
-            local_v4,
-        }
+    pub fn new(name: String) -> Self {
+        Self { name }
     }
 
     fn open_handle() -> Result<Handle, TunnelError> {
@@ -91,11 +85,15 @@ impl LinuxBackend {
         }
     }
 
-    async fn create_tunnel(&self, handle: &Handle) -> Result<u32, TunnelError> {
+    async fn create_tunnel(
+        &self,
+        handle: &Handle,
+        desired: &DesiredState,
+    ) -> Result<u32, TunnelError> {
         let message = LinkMessageBuilder::<LinkUnspec>::new_with_info_kind(InfoKind::Ip6Tnl)
             .set_info_data(InfoData::IpTunnel(vec![
-                InfoIpTunnel::Local(std::net::IpAddr::V6(self.local_v6)),
-                InfoIpTunnel::Remote(std::net::IpAddr::V6(self.remote_v6)),
+                InfoIpTunnel::Local(std::net::IpAddr::V6(desired.local_v6)),
+                InfoIpTunnel::Remote(std::net::IpAddr::V6(desired.remote_v6)),
                 InfoIpTunnel::Protocol(IpProtocol::Ipip),
                 InfoIpTunnel::Ipv6Flags(Ip6TunnelFlags::IgnEncapLimit), // TODO: make configurable
             ]))
@@ -123,14 +121,19 @@ impl LinuxBackend {
             .inspect(|u| tracing::debug!(name = %self.name, index = %u, "created interface"))
     }
 
-    async fn add_address(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
+    async fn add_address(
+        &self,
+        handle: &Handle,
+        index: u32,
+        local_v4: Ipv4Addr,
+    ) -> Result<(), TunnelError> {
         handle
             .address()
-            .add(index, std::net::IpAddr::V4(self.local_v4), B4_V4_PREFIX_LEN)
+            .add(index, std::net::IpAddr::V4(local_v4), B4_V4_PREFIX_LEN)
             .execute()
             .await
             .map_err(|e| TunnelError::AddressFailed(e.to_string()))
-            .inspect(|_| tracing::debug!(address = %self.local_v4, "assigned local address"))
+            .inspect(|_| tracing::debug!(address = %local_v4, "assigned local address"))
     }
 
     async fn add_default_route(&self, handle: &Handle, index: u32) -> Result<(), TunnelError> {
@@ -150,18 +153,18 @@ impl LinuxBackend {
 }
 
 impl TunnelBackend for LinuxBackend {
-    async fn setup(&self) -> Result<(), TunnelError> {
+    async fn setup(&self, desired: &DesiredState) -> Result<(), TunnelError> {
         let handle = Self::open_handle()?;
 
-        let index = self.create_tunnel(&handle).await?;
-        self.add_address(&handle, index).await?;
+        let index = self.create_tunnel(&handle, desired).await?;
+        self.add_address(&handle, index, desired.local_v4).await?;
         self.add_default_route(&handle, index).await?;
 
         tracing::info!(
             name = %self.name,
-            local_v6 = %self.local_v6,
-            remote_v6 = %self.remote_v6,
-            local_v4 = %self.local_v4,
+            local_v6 = %desired.local_v6,
+            remote_v6 = %desired.remote_v6,
+            local_v4 = %desired.local_v4,
             "tunnel established"
         );
 
@@ -203,6 +206,7 @@ impl TunnelBackend for LinuxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv6Addr;
 
     fn tunnel_link(local: IpAddr, remote: IpAddr, admin_up: bool) -> LinkMessage {
         let mut link = LinkMessage::default();

@@ -23,6 +23,13 @@ pub enum Observed {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesiredState {
+    pub local_v6: Ipv6Addr,
+    pub remote_v6: Ipv6Addr,
+    pub local_v4: Ipv4Addr,
+}
+
 #[derive(Debug, Error)]
 pub enum TunnelError {
     #[error("creating tunnel: {0}")]
@@ -38,7 +45,8 @@ pub enum TunnelError {
 }
 
 pub trait TunnelBackend: Send + Sync {
-    fn setup(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
+    fn setup(&self, desired: &DesiredState)
+    -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn teardown(&self) -> impl Future<Output = Result<(), TunnelError>> + Send;
     fn observe(&self) -> impl Future<Output = Result<Observed, TunnelError>> + Send;
 }

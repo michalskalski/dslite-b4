@@ -1,13 +1,7 @@
-use crate::tunnel::Observed;
-use std::net::Ipv6Addr;
-
-struct DesiredEndpoints {
-    local_v6: Ipv6Addr,
-    remote_v6: Ipv6Addr,
-}
+use crate::tunnel::{DesiredState, Observed};
 
 enum Desired {
-    Resolved(DesiredEndpoints),
+    Resolved(DesiredState),
     Unavailable,
 }
 
@@ -47,6 +41,15 @@ fn decide(observed: &Observed, desired: &Desired) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn desired(local_v6: Ipv6Addr, remote_v6: Ipv6Addr) -> Desired {
+        Desired::Resolved(DesiredState {
+            local_v6,
+            remote_v6,
+            local_v4: Ipv4Addr::new(192, 0, 0, 2),
+        })
+    }
 
     #[test]
     fn keep_when_observed_absent_and_desired_unavailable() {
@@ -68,10 +71,7 @@ mod tests {
 
     #[test]
     fn create_when_observed_absent_and_desired_resolved() {
-        let desired = Desired::Resolved(DesiredEndpoints {
-            local_v6: Ipv6Addr::LOCALHOST,
-            remote_v6: Ipv6Addr::UNSPECIFIED,
-        });
+        let desired = desired(Ipv6Addr::LOCALHOST, Ipv6Addr::UNSPECIFIED);
 
         let action = decide(&Observed::Absent, &desired);
 
@@ -87,10 +87,7 @@ mod tests {
             remote_v6,
             admin_up: true,
         };
-        let desired = Desired::Resolved(DesiredEndpoints {
-            local_v6,
-            remote_v6,
-        });
+        let desired = desired(local_v6, remote_v6);
 
         let action = decide(&observed, &desired);
 
@@ -106,10 +103,7 @@ mod tests {
             remote_v6,
             admin_up: false,
         };
-        let desired = Desired::Resolved(DesiredEndpoints {
-            local_v6,
-            remote_v6,
-        });
+        let desired = desired(local_v6, remote_v6);
 
         let action = decide(&observed, &desired);
 
@@ -124,10 +118,7 @@ mod tests {
             remote_v6,
             admin_up: true,
         };
-        let desired = Desired::Resolved(DesiredEndpoints {
-            local_v6: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-            remote_v6,
-        });
+        let desired = desired(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), remote_v6);
 
         let action = decide(&observed, &desired);
 
@@ -142,10 +133,7 @@ mod tests {
             remote_v6: Ipv6Addr::UNSPECIFIED,
             admin_up: true,
         };
-        let desired = Desired::Resolved(DesiredEndpoints {
-            local_v6,
-            remote_v6: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-        });
+        let desired = desired(local_v6, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
 
         let action = decide(&observed, &desired);
 

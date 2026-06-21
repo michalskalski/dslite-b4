@@ -14,7 +14,9 @@ mod pf_route;
 mod sys;
 
 use crate::tunnel::illumos::pf_route::RouteSocket;
-use crate::tunnel::{AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, Observed, TunnelBackend, TunnelError};
+use crate::tunnel::{
+    AFTR_V4_ELEMENT, B4_V4_PREFIX_LEN, DesiredState, Observed, TunnelBackend, TunnelError,
+};
 use std::io;
 use std::mem::MaybeUninit;
 use std::{
@@ -29,29 +31,20 @@ const B4_V4_NETMASK: Ipv4Addr = Ipv4Addr::from_bits(u32::MAX << (32 - B4_V4_PREF
 
 pub struct IllumosBackend {
     cname: CString,
-    local_v6: Ipv6Addr,
-    remote_v6: Ipv6Addr,
-    local_v4: Ipv4Addr,
 }
 
 impl IllumosBackend {
-    pub fn new(
-        name: String,
-        local_v6: Ipv6Addr,
-        remote_v6: Ipv6Addr,
-        local_v4: Ipv4Addr,
-    ) -> Result<Self, std::ffi::NulError> {
+    pub fn new(name: String) -> Result<Self, std::ffi::NulError> {
         let cname = std::ffi::CString::new(name)?;
 
-        Ok(Self {
-            cname,
-            local_v6,
-            remote_v6,
-            local_v4,
-        })
+        Ok(Self { cname })
     }
-    fn create_tunnel(&self, handle: &DladmHandle) -> Result<u32, TunnelError> {
-        let mut params = build_tunnel_params(&self.local_v6, &self.remote_v6);
+    fn create_tunnel(
+        &self,
+        handle: &DladmHandle,
+        desired: &DesiredState,
+    ) -> Result<u32, TunnelError> {
+        let mut params = build_tunnel_params(&desired.local_v6, &desired.remote_v6);
 
         // SAFETY:
         // - `handle.ptr` was produced by a successful `dladm_open` (see
@@ -256,11 +249,11 @@ impl IllumosBackend {
 }
 
 impl TunnelBackend for IllumosBackend {
-    async fn setup(&self) -> Result<(), TunnelError> {
+    async fn setup(&self, desired: &DesiredState) -> Result<(), TunnelError> {
         let handle = open_dladm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, dladm_open status {}", e))
         })?;
-        let _link_id = self.create_tunnel(&handle)?;
+        let _link_id = self.create_tunnel(&handle, desired)?;
 
         let ip_handle = open_ipadm().map_err(|e| {
             TunnelError::CreationFailed(format!("unable to open handle, ipadm_open status {}", e))
@@ -279,7 +272,7 @@ impl TunnelBackend for IllumosBackend {
         // across all four calls.
 
         // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
-        unsafe { set_local_addr(fd, &self.cname, self.local_v4) }
+        unsafe { set_local_addr(fd, &self.cname, desired.local_v4) }
             .map_err(|e| TunnelError::CreationFailed(format!("set_local_addr: {}", e)))?;
         // SAFETY: `fd` is a valid SIOCSLIF*-capable socket (see above).
         unsafe { set_dst_addr(fd, &self.cname, AFTR_V4_ELEMENT) }
@@ -298,8 +291,9 @@ impl TunnelBackend for IllumosBackend {
 
         tracing::info!(
             name = %self.cname.to_string_lossy(),
-            local_v6 = %self.local_v6,
-            remote_v6 = %self.remote_v6,
+            local_v6 = %desired.local_v6,
+            remote_v6 = %desired.remote_v6,
+            local_v4 = %desired.local_v4,
             "tunnel established"
         );
 
@@ -600,13 +594,7 @@ mod tests {
             .expect("DSLITE_TEST_TUNNEL must name the prepared test tunnel");
         let expected = std::env::var("DSLITE_TEST_EXPECT")
             .expect("DSLITE_TEST_EXPECT must be present-up, present-down, or absent");
-        let backend = IllumosBackend::new(
-            name,
-            Ipv6Addr::UNSPECIFIED,
-            Ipv6Addr::UNSPECIFIED,
-            Ipv4Addr::new(192, 0, 0, 2),
-        )
-        .unwrap();
+        let backend = IllumosBackend::new(name).unwrap();
 
         let observed = backend.observe().await.unwrap();
 

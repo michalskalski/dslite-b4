@@ -2,7 +2,11 @@
 use dslite_b4::tunnel::illumos::IllumosBackend;
 #[cfg(target_os = "linux")]
 use dslite_b4::tunnel::linux::LinuxBackend;
-use dslite_b4::{config::Config, dns::resolve, tunnel::TunnelBackend};
+use dslite_b4::{
+    config::Config,
+    dns::resolve,
+    tunnel::{DesiredState, TunnelBackend},
+};
 use std::{path::PathBuf, time::Duration};
 use tokio::signal;
 
@@ -75,29 +79,25 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             };
-            #[cfg(target_os = "linux")]
-            let backend = LinuxBackend::new(
-                config.tunnel.name,
+            let desired = DesiredState {
                 local_v6,
-                aftr_ip,
-                config.tunnel.local_v4,
-            );
-            #[cfg(target_os = "illumos")]
-            let backend = IllumosBackend::new(
-                config.tunnel.name,
-                local_v6,
-                aftr_ip,
-                config.tunnel.local_v4,
-            )?;
+                remote_v6: aftr_ip,
+                local_v4: config.tunnel.local_v4,
+            };
 
-            run(backend).await?
+            #[cfg(target_os = "linux")]
+            let backend = LinuxBackend::new(config.tunnel.name);
+            #[cfg(target_os = "illumos")]
+            let backend = IllumosBackend::new(config.tunnel.name)?;
+
+            run(backend, desired).await?
         }
     }
     Ok(())
 }
 
-async fn run<B: TunnelBackend>(backend: B) -> anyhow::Result<()> {
-    backend.setup().await?;
+async fn run<B: TunnelBackend>(backend: B, desired: DesiredState) -> anyhow::Result<()> {
+    backend.setup(&desired).await?;
 
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     tokio::select! {
