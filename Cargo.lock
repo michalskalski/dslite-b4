@@ -143,6 +143,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-channel",
  "futures-util",
  "libc",
  "rtnetlink",

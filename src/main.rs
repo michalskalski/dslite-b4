@@ -1,3 +1,4 @@
+use clap::{Parser, Subcommand};
 #[cfg(target_os = "illumos")]
 use dslite_b4::tunnel::illumos::IllumosBackend;
 #[cfg(target_os = "linux")]
@@ -6,12 +7,11 @@ use dslite_b4::{
     config::Config,
     dns::resolve,
     lifecycle::{Desired, reconcile_once},
+    network_changes::NetworkChanges,
     tunnel::{DesiredState, TunnelBackend},
 };
 use std::{path::PathBuf, time::Duration};
 use tokio::signal;
-
-use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "dslite-b4", about = "DS-Lite B4 client")]
@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run<B: TunnelBackend>(backend: B, config: &Config) -> anyhow::Result<()> {
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    let mut network_changes = NetworkChanges::new()?;
     let mut attempt: u64 = 0;
     loop {
         let desired = compute_desired(config).await?;
@@ -82,6 +83,7 @@ async fn run<B: TunnelBackend>(backend: B, config: &Config) -> anyhow::Result<()
         };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {},
+            result = network_changes.changed() => { result?; attempt = 0; }
             _ = signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
         }
