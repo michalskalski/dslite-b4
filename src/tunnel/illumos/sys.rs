@@ -500,6 +500,10 @@ pub unsafe fn is_up(sock_fd: c_int, name: &CStr) -> io::Result<bool> {
 pub const RTM_VERSION: c_uchar = 3;
 pub const RTM_ADD: c_uchar = 0x1;
 pub const RTM_DELETE: c_uchar = 0x2;
+pub const RTM_NEWADDR: c_uchar = 0xc;
+pub const RTM_DELADDR: c_uchar = 0xd;
+pub const RTM_CHGADDR: c_uchar = 0xf;
+pub const RTM_FREEADDR: c_uchar = 0x10;
 
 pub const RTF_UP: c_int = 0x1;
 pub const RTF_GATEWAY: c_int = 0x2;

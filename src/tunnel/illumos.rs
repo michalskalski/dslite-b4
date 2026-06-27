@@ -26,6 +26,10 @@ use std::{
 };
 use sys::*;
 
+pub(crate) use sys::{
+    RTM_ADD, RTM_CHGADDR, RTM_DELADDR, RTM_DELETE, RTM_FREEADDR, RTM_NEWADDR, rt_msghdr,
+};
+
 // /29 -> 255.255.255.248
 const B4_V4_NETMASK: Ipv4Addr = Ipv4Addr::from_bits(u32::MAX << (32 - B4_V4_PREFIX_LEN));
 
