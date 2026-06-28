@@ -1,8 +1,14 @@
+[runtime]
+# pidfile, provided AFTR, v6mig cache, and status snapshot
+state_dir = "/var/run/dslite-b4"
+
 [tunnel]
-local_v6 = "2001:d8::1"
+# When omitted, local_v6 is discovered from the route to the AFTR.
+# local_v6 = "2001:db8::1"
 local_v4 = "192.0.0.2"
 
 [aftr]
-address = "2001:d8::2"
+# Optional static override. If omitted, the daemon reads runtime AFTR state.
+address = "2001:db8::2"
 
 [health]

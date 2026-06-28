@@ -1,10 +1,11 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "illumos")]
 use dslite_b4::tunnel::illumos::IllumosBackend;
 #[cfg(target_os = "linux")]
 use dslite_b4::tunnel::linux::LinuxBackend;
 use dslite_b4::{
-    config::Config,
+    config::{AftrAddress, Config},
     dns::resolve,
     lifecycle::{Desired, reconcile_once},
     network_changes::NetworkChanges,
@@ -32,6 +33,8 @@ enum Commands {
     },
 }
 
+const PROVIDED_AFTR_FILENAME: &str = "aftr";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -48,6 +51,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Run { config } => {
             let config = toml::from_str::<Config>(&std::fs::read_to_string(config)?)?;
+
+            std::fs::create_dir_all(&config.runtime.state_dir).with_context(|| {
+                format!(
+                    "creating runtime state directory {}",
+                    config.runtime.state_dir.display()
+                )
+            })?;
 
             #[cfg(target_os = "linux")]
             let backend = LinuxBackend::new(config.tunnel.name.clone());
@@ -94,7 +104,11 @@ async fn run<B: TunnelBackend>(backend: B, config: &Config) -> anyhow::Result<()
 }
 
 async fn compute_desired(config: &Config) -> anyhow::Result<Desired> {
-    let aftr_ip = match resolve(&config.aftr.address).await {
+    let Some(aftr) = effective_aftr(config)? else {
+        tracing::debug!("no AFTR source available");
+        return Ok(Desired::Unavailable);
+    };
+    let aftr_ip = match resolve(&aftr).await {
         Ok(addr) => addr,
         Err(e) => {
             tracing::warn!(error = %e, "AFTR resolution unavailable");
@@ -117,4 +131,24 @@ async fn compute_desired(config: &Config) -> anyhow::Result<Desired> {
         remote_v6: aftr_ip,
         local_v4: config.tunnel.local_v4,
     }))
+}
+
+fn effective_aftr(config: &Config) -> anyhow::Result<Option<AftrAddress>> {
+    if let Some(address) = &config.aftr.address {
+        return Ok(Some(address.clone()));
+    }
+
+    let path = config.runtime.state_dir.join(PROVIDED_AFTR_FILENAME);
+
+    match std::fs::read_to_string(&path) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(AftrAddress::from(value.to_owned())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading AFTR state file {}", path.display())),
+    }
 }

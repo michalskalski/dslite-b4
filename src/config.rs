@@ -1,10 +1,13 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer};
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     pub tunnel: TunnelConfig,
     pub aftr: AftrConfig,
     pub health: HealthConfig,
@@ -41,7 +44,7 @@ where
     Ok(addr)
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(from = "String")]
 pub enum AftrAddress {
     Ip(Ipv6Addr),
@@ -60,13 +63,27 @@ impl From<String> for AftrAddress {
 
 #[derive(Deserialize, Debug)]
 pub struct AftrConfig {
-    pub address: AftrAddress,
+    pub address: Option<AftrAddress>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct HealthConfig {
     #[serde(default = "default_health_interval")]
     pub interval_secs: NonZeroU64,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_runtime_state_dir")]
+    pub state_dir: PathBuf,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            state_dir: default_runtime_state_dir(),
+        }
+    }
 }
 
 fn default_tunnel_name() -> String {
@@ -79,4 +96,8 @@ fn default_health_interval() -> NonZeroU64 {
 
 fn default_tunnel_local_v4() -> Ipv4Addr {
     Ipv4Addr::new(192, 0, 0, 2)
+}
+
+fn default_runtime_state_dir() -> PathBuf {
+    PathBuf::from("/var/run/dslite-b4")
 }
